@@ -59,6 +59,7 @@ export interface AppointmentInfo {
   mode: string;
   patientName: string;
   patientEmail: string;
+  patientPhone?: string;
   amount?: number;
   currency?: string;
   gateway?: string;
