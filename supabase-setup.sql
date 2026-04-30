@@ -1,118 +1,137 @@
--- Run this in your Supabase SQL Editor (dashboard.supabase.com → SQL Editor)
+-- ================================================================
+--  Complete Database Setup
+--  Run once in Supabase SQL Editor to create all tables fresh.
+--  Safe to re-run: drops all tables and recreates them cleanly.
+-- ================================================================
 
--- Drop existing table if it was created without the correct columns
-drop table if exists appointments cascade;
+-- ── Drop (leaf → root to respect FK order) ───────────────────
+DROP TABLE IF EXISTS notification_log CASCADE;
+DROP TABLE IF EXISTS prescriptions    CASCADE;
+DROP TABLE IF EXISTS payments         CASCADE;
+DROP TABLE IF EXISTS available_slots  CASCADE;
+DROP TABLE IF EXISTS booked_slots     CASCADE;
+DROP TABLE IF EXISTS appointments     CASCADE;
 
-create table appointments (
-  id uuid default gen_random_uuid() primary key,
-  user_id uuid references auth.users(id) on delete cascade not null,
-  date text not null,
-  time text not null,
-  type text not null,
-  mode text not null default 'In-Person',
-  status text not null default 'pending',
-  created_at timestamptz default now()
+
+-- ── 1. appointments ───────────────────────────────────────────
+CREATE TABLE appointments (
+  id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  date       TEXT        NOT NULL,   -- "YYYY-MM-DD"
+  time       TEXT        NOT NULL,   -- "9:00 AM"
+  type       TEXT        NOT NULL,
+  mode       TEXT        NOT NULL DEFAULT 'In-Person',  -- 'In-Person' | 'Video'
+  status     TEXT        NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Row Level Security: each user sees only their own appointments
-alter table appointments enable row level security;
+ALTER TABLE appointments ENABLE ROW LEVEL SECURITY;
 
-create policy "Users can view own appointments"
-  on appointments for select
-  using (auth.uid() = user_id);
+CREATE POLICY "appt_select_own"  ON appointments FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "appt_insert_own"  ON appointments FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "appt_update_own"  ON appointments FOR UPDATE USING (auth.uid() = user_id);
+CREATE POLICY "appt_service_all" ON appointments FOR ALL TO service_role USING (true) WITH CHECK (true);
 
-create policy "Users can insert own appointments"
-  on appointments for insert
-  with check (auth.uid() = user_id);
+ALTER PUBLICATION supabase_realtime ADD TABLE appointments;
 
-create policy "Users can update own appointments"
-  on appointments for update
-  using (auth.uid() = user_id);
 
--- Enable real-time for the appointments table
--- (In Supabase dashboard: Database → Replication → enable appointments table)
-alter publication supabase_realtime add table appointments;
-
--- ─────────────────────────────────────────────────────────────
--- booked_slots: cross-user slot availability (no PII exposed)
--- Run this block after the appointments table is created
--- ─────────────────────────────────────────────────────────────
-drop table if exists booked_slots cascade;
-
-create table booked_slots (
-  id uuid default gen_random_uuid() primary key,
-  appointment_id uuid references appointments(id) on delete cascade not null,
-  date text not null,
-  time text not null,
-  created_at timestamptz default now()
+-- ── 2. booked_slots ───────────────────────────────────────────
+--    Cross-user slot availability (no PII exposed — only date + time)
+CREATE TABLE booked_slots (
+  id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  appointment_id UUID        NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
+  date           TEXT        NOT NULL,
+  time           TEXT        NOT NULL,
+  created_at     TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Index for fast per-date lookups
-create index booked_slots_date_idx on booked_slots (date);
+CREATE INDEX booked_slots_date_idx ON booked_slots (date);
 
-alter table booked_slots enable row level security;
+ALTER TABLE booked_slots ENABLE ROW LEVEL SECURITY;
 
--- Any authenticated user can see which slots are taken (only date+time, no PII)
-create policy "Authenticated users can view booked slots"
-  on booked_slots for select
-  using (auth.role() = 'authenticated');
+CREATE POLICY "slots_select_auth" ON booked_slots FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "slots_insert_auth" ON booked_slots FOR INSERT WITH CHECK (auth.role() = 'authenticated');
 
--- Authenticated users can insert when they book
-create policy "Authenticated users can insert booked slots"
-  on booked_slots for insert
-  with check (auth.role() = 'authenticated');
+ALTER PUBLICATION supabase_realtime ADD TABLE booked_slots;
 
--- Enable real-time so slot grid updates live across all patients
-alter publication supabase_realtime add table booked_slots;
 
--- ─────────────────────────────────────────────────────────────
--- available_slots: Doctor-managed weekly slot availability
--- ─────────────────────────────────────────────────────────────
-drop table if exists available_slots cascade;
-
-create table available_slots (
-  id uuid default gen_random_uuid() primary key,
-  week_start_date date not null,          -- Monday of the week (ISO date, e.g. 2026-04-21)
-  day_of_week smallint not null check (day_of_week between 1 and 7),
-  -- 1=Monday, 2=Tuesday, ..., 6=Saturday, 7=Sunday
-  time_slot text not null,                -- e.g. '9:00 AM'
-  is_active boolean not null default true,
-  unique (week_start_date, day_of_week, time_slot)
+-- ── 3. available_slots ────────────────────────────────────────
+--    Doctor-managed weekly slot grid (each week is independent)
+CREATE TABLE available_slots (
+  id              UUID     PRIMARY KEY DEFAULT gen_random_uuid(),
+  week_start_date DATE     NOT NULL,          -- Monday of the week  e.g. 2026-05-05
+  day_of_week     SMALLINT NOT NULL CHECK (day_of_week BETWEEN 1 AND 7),  -- 1=Mon … 7=Sun
+  time_slot       TEXT     NOT NULL,          -- e.g. '9:00 AM'
+  is_active       BOOLEAN  NOT NULL DEFAULT true,
+  UNIQUE (week_start_date, day_of_week, time_slot)
 );
 
--- Public read: patients need to see which slots are available
-alter table available_slots enable row level security;
+ALTER TABLE available_slots ENABLE ROW LEVEL SECURITY;
 
-create policy "Anyone can read available slots"
-  on available_slots for select
-  using (true);
+CREATE POLICY "avail_select_all"  ON available_slots FOR SELECT USING (true);
+CREATE POLICY "avail_service_all" ON available_slots FOR ALL TO service_role USING (true) WITH CHECK (true);
 
--- Only service role (admin API routes) can mutate
-create policy "Service role manages available slots"
-  on available_slots for all
-  using (auth.role() = 'service_role');
 
--- ─────────────────────────────────────────────────────────────
--- doctor_meetings: Persists Daily.co rooms created by doctor
--- ─────────────────────────────────────────────────────────────
-drop table if exists doctor_meetings cascade;
-
-create table doctor_meetings (
-  id uuid default gen_random_uuid() primary key,
-  room_name text not null,
-  room_url  text not null,
-  code      text not null,
-  created_at timestamptz default now(),
-  expires_at timestamptz not null,
-  is_active  boolean not null default true
+-- ── 4. payments ───────────────────────────────────────────────
+CREATE TABLE payments (
+  id                 UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+  appointment_id     UUID          NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
+  gateway            TEXT          NOT NULL CHECK (gateway IN ('stripe', 'paypal')),
+  amount             NUMERIC(10,2) NOT NULL,
+  currency           TEXT          NOT NULL DEFAULT 'usd',
+  status             TEXT          NOT NULL DEFAULT 'pending'
+                                   CHECK (status IN ('pending', 'paid', 'failed', 'refunded')),
+  gateway_payment_id TEXT          UNIQUE,
+  paid_at            TIMESTAMPTZ,
+  created_at         TIMESTAMPTZ   DEFAULT NOW()
 );
 
-alter table doctor_meetings enable row level security;
+CREATE INDEX payments_appointment_id_idx ON payments (appointment_id);
 
-create policy "Service role manages doctor meetings"
-  on doctor_meetings for all
-  using (auth.role() = 'service_role');
+ALTER TABLE payments ENABLE ROW LEVEL SECURITY;
 
-create policy "Authenticated users can read meetings"
-  on doctor_meetings for select
-  using (auth.role() = 'authenticated');
+CREATE POLICY "payments_select_own" ON payments
+  FOR SELECT USING (
+    appointment_id IN (SELECT id FROM appointments WHERE user_id = auth.uid())
+  );
+CREATE POLICY "payments_service_all" ON payments FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+
+-- ── 6. prescriptions ──────────────────────────────────────────
+CREATE TABLE prescriptions (
+  id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  patient_id     UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  appointment_id UUID        REFERENCES appointments(id) ON DELETE SET NULL,
+  diagnosis      TEXT        NOT NULL,
+  doctor_note    TEXT        NOT NULL DEFAULT '',
+  medications    JSONB       NOT NULL DEFAULT '[]',
+  follow_up      DATE,
+  created_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX prescriptions_patient_id_idx ON prescriptions (patient_id);
+
+ALTER TABLE prescriptions ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "rx_select_own"  ON prescriptions FOR SELECT USING (auth.uid() = patient_id);
+CREATE POLICY "rx_service_all" ON prescriptions FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+
+-- ── 7. notification_log ───────────────────────────────────────
+--    Deduplicates emails — one row per (appointment, email type)
+CREATE TABLE notification_log (
+  id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  appointment_id UUID        NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
+  type           TEXT        NOT NULL
+                             CHECK (type IN ('confirmation', 'reminder_24h', 'reminder_1h')),
+  sent_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (appointment_id, type)
+);
+
+ALTER TABLE notification_log ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "notif_select_own" ON notification_log
+  FOR SELECT USING (
+    appointment_id IN (SELECT id FROM appointments WHERE user_id = auth.uid())
+  );
+CREATE POLICY "notif_service_all" ON notification_log FOR ALL TO service_role USING (true) WITH CHECK (true);

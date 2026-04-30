@@ -30,17 +30,7 @@ function Badge({ status }: { status: string }) {
   );
 }
 
-function ModeIcon({ mode }: { mode: string }) {
-  if (mode === "Video") {
-    return (
-      <span className="inline-flex items-center gap-1 text-xs font-medium text-teal-700 bg-teal-50 rounded-full px-2.5 py-1">
-        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.069A1 1 0 0121 8.82v6.36a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-        </svg>
-        Video
-      </span>
-    );
-  }
+function ModeIcon() {
   return (
     <span className="inline-flex items-center gap-1 text-xs font-medium text-purple-700 bg-purple-50 rounded-full px-2.5 py-1">
       <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -261,7 +251,7 @@ export default function AppointmentsPage() {
                         {appt.time}
                       </span>
                       <span className="text-gray-300">·</span>
-                      <ModeIcon mode={appt.mode} />
+                      <ModeIcon />
                     </div>
                     <p className="text-xs text-gray-400 mt-1">{formatDate(appt.date)}</p>
                   </div>
@@ -270,17 +260,6 @@ export default function AppointmentsPage() {
                   <div className="flex-shrink-0 flex flex-col items-end gap-2 pt-1">
                     {!isPast && appt.status !== "cancelled" && (
                       <>
-                        {appt.mode === "Video" && (
-                          <Link
-                            href={`/consult/${appt.id}`}
-                            className="inline-flex items-center gap-1.5 text-xs font-semibold text-teal-700 bg-teal-50 hover:bg-teal-100 px-3 py-1.5 rounded-lg transition-colors"
-                          >
-                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.069A1 1 0 0121 8.82v6.36a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                            </svg>
-                            Join Video
-                          </Link>
-                        )}
                         <button
                           onClick={() => handleCancel(appt.id)}
                           disabled={cancelling === appt.id}

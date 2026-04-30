@@ -71,13 +71,6 @@ function IconUser() {
     </svg>
   );
 }
-function IconVideo() {
-  return (
-    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-      <rect x="2" y="7" width="13" height="10" rx="2" /><path d="M15 10l5-3v10l-5-3v-4z" />
-    </svg>
-  );
-}
 function IconPin() {
   return (
     <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
@@ -135,7 +128,6 @@ export default function BookPage() {
   const [appointmentType, setType]    = useState('');
   const [selectedDate, setDate]       = useState('');
   const [selectedTime, setTime]       = useState('');
-  const [mode, setMode]               = useState<'In-Person' | 'Video'>('In-Person');
   const [bookedSlots, setBookedSlots]   = useState<string[]>([]);
   const [activeSlots, setActiveSlots]   = useState<string[]>([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
@@ -235,18 +227,29 @@ export default function BookPage() {
         return;
       }
 
+      // If this user already has a pending appointment for the same slot, go to that payment page
+      const { data: existingPending } = await supabase
+        .from('appointments')
+        .select('id')
+        .eq('user_id', user.id)
+        .eq('date', selectedDate)
+        .eq('time', selectedTime)
+        .eq('status', 'pending')
+        .maybeSingle();
+
+      if (existingPending) {
+        router.push(`/book/pay/${existingPending.id}`);
+        return;
+      }
+
       const { data: appt, error: apptErr } = await supabase
         .from('appointments')
-        .insert({ user_id: user.id, date: selectedDate, time: selectedTime, type: appointmentType, mode, status: 'pending' })
+        .insert({ user_id: user.id, date: selectedDate, time: selectedTime, type: appointmentType, mode: 'In-Person', status: 'pending' })
         .select()
         .single();
       if (apptErr) throw apptErr;
 
-      const { error: slotErr } = await supabase
-        .from('booked_slots')
-        .insert({ appointment_id: appt.id, date: selectedDate, time: selectedTime });
-      if (slotErr) throw slotErr;
-
+      // Slot is locked only after payment is completed — do NOT insert into booked_slots here.
       router.push(`/book/pay/${appt.id}`);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Booking failed. Please try again.');
@@ -351,40 +354,10 @@ export default function BookPage() {
               </div>
             </div>
 
-            {/* Step 2 — Mode */}
+            {/* Step 2 — Date */}
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
               <div className="flex items-center gap-3 mb-5">
                 <span className="w-7 h-7 rounded-full bg-teal-500 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">2</span>
-                <h2 className="text-base font-semibold text-gray-900">Consultation Mode</h2>
-              </div>
-              <div className="flex gap-3">
-                {(['In-Person', 'Video'] as const).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => setMode(m)}
-                    className={`flex-1 flex items-center justify-center gap-2 rounded-xl border-2 py-3.5 font-semibold text-sm transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-teal-400 focus:ring-offset-1
-                      ${mode === m
-                        ? 'border-teal-500 bg-teal-500 text-white shadow-md shadow-teal-200'
-                        : 'border-gray-200 text-gray-600 hover:border-teal-300 hover:bg-teal-50/60'
-                      }`}
-                  >
-                    {m === 'In-Person' ? <IconPin /> : <IconVideo />}
-                    {m}
-                  </button>
-                ))}
-              </div>
-              <p className="mt-3 text-xs rounded-lg px-3 py-2 bg-gray-50 text-gray-500">
-                {mode === 'Video'
-                  ? '📹 A secure video link will be emailed to you before the appointment.'
-                  : '📍 123 Medical Center Drive, Suite 400 — please arrive 10 min early.'}
-              </p>
-            </div>
-
-            {/* Step 3 — Date */}
-            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
-              <div className="flex items-center gap-3 mb-5">
-                <span className="w-7 h-7 rounded-full bg-teal-500 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">3</span>
                 <h2 className="text-base font-semibold text-gray-900">Select Date</h2>
               </div>
               <div className="relative max-w-xs">
@@ -406,10 +379,10 @@ export default function BookPage() {
               )}
             </div>
 
-            {/* Step 4 — Time slot */}
+            {/* Step 3 — Time slot */}
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
               <div className="flex items-center gap-3 mb-5">
-                <span className="w-7 h-7 rounded-full bg-teal-500 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">4</span>
+                <span className="w-7 h-7 rounded-full bg-teal-500 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">3</span>
                 <h2 className="text-base font-semibold text-gray-900">Choose Time Slot</h2>
                 {selectedDate && !loadingSlots && (
                   <span className="ml-auto text-xs text-gray-400 bg-gray-50 border border-gray-100 rounded-full px-2.5 py-1">
@@ -553,7 +526,6 @@ export default function BookPage() {
               <ul className="space-y-3.5">
                 {[
                   { icon: <span className="text-base">📋</span>, label: 'Type',   val: appointmentType || '—' },
-                  { icon: mode === 'Video' ? <IconVideo /> : <IconPin />, label: 'Mode', val: mode },
                   { icon: <IconCal />,   label: 'Date',   val: fmtDate(selectedDate) },
                   { icon: <IconClock />, label: 'Time',   val: selectedTime || '—'   },
                 ].map(({ icon, label, val }) => (

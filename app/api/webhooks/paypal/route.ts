@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { sendPaymentConfirmation } from '@/lib/notifications';
+import { sendPaymentConfirmation } from '@/lib/email';
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -60,6 +60,8 @@ export async function POST(req: Request) {
 
     if (appointment_id) {
       const currency = (capture.amount?.currency_code ?? 'USD').toLowerCase();
+
+      // Record payment
       await supabaseAdmin.from('payments').upsert(
         {
           appointment_id,
@@ -73,48 +75,105 @@ export async function POST(req: Request) {
         { onConflict: 'gateway_payment_id' }
       );
 
-      firePaymentConfirmation(appointment_id, amount, currency, 'paypal').catch(console.error);
+      // Mark appointment confirmed
+      await supabaseAdmin
+        .from('appointments')
+        .update({ status: 'confirmed' })
+        .eq('id', appointment_id);
+
+      // Lock the slot now that payment is complete
+      const { data: apptSlot } = await supabaseAdmin
+        .from('appointments')
+        .select('date, time')
+        .eq('id', appointment_id)
+        .single();
+
+      if (apptSlot) {
+        const { error: slotErr } = await supabaseAdmin
+          .from('booked_slots')
+          .insert({ appointment_id, date: apptSlot.date, time: apptSlot.time });
+        if (slotErr) console.error('[slot] booked_slots insert failed:', slotErr.message);
+
+        // Cancel any other pending appointments for this slot (ghost bookings from abandoned payment attempts)
+        await supabaseAdmin
+          .from('appointments')
+          .update({ status: 'cancelled' })
+          .eq('date', apptSlot.date)
+          .eq('time', apptSlot.time)
+          .eq('status', 'pending')
+          .neq('id', appointment_id);
+      }
+
+      // Send confirmation email
+      await fireConfirmation(appointment_id, amount, currency, 'paypal', capture.id);
     }
   }
 
   return NextResponse.json({ received: true });
 }
 
-async function firePaymentConfirmation(
+async function fireConfirmation(
   appointmentId: string,
   amount: number,
   currency: string,
   gateway: string,
+  gatewayPaymentId: string,
 ) {
+  const { data: alreadySent } = await supabaseAdmin
+    .from('notification_log')
+    .select('id')
+    .eq('appointment_id', appointmentId)
+    .eq('type', 'confirmation')
+    .maybeSingle();
+
+  if (alreadySent) {
+    console.log('[email] confirmation already sent for', appointmentId);
+    return;
+  }
+
   const { data: appt } = await supabaseAdmin
     .from('appointments')
     .select('id, date, time, type, mode, user_id')
     .eq('id', appointmentId)
     .single();
 
-  if (!appt) return;
+  if (!appt) {
+    console.error('[email] appointment not found:', appointmentId);
+    return;
+  }
 
   const { data: userData } = await supabaseAdmin.auth.admin.getUserById(appt.user_id);
-  if (!userData?.user) return;
+  if (!userData?.user?.email) {
+    console.error('[email] no email for user:', appt.user_id);
+    return;
+  }
 
   const user = userData.user;
-  const patientName = user.user_metadata?.full_name || user.email?.split('@')[0] || 'Patient';
+  const patientEmail = user.email!;
+  const patientName =
+    (user.user_metadata?.full_name as string | undefined) ?? patientEmail.split('@')[0];
 
-  await sendPaymentConfirmation({
-    id: appt.id,
-    date: appt.date,
-    time: appt.time,
-    type: appt.type,
-    mode: appt.mode,
-    patientName,
-    patientEmail: user.email!,
-    amount,
-    currency,
-    gateway,
-  });
+  try {
+    await sendPaymentConfirmation({
+      patientName,
+      patientEmail,
+      appointmentId: appt.id,
+      date: appt.date,
+      time: appt.time,
+      type: appt.type,
+      mode: appt.mode,
+      amount,
+      currency,
+      gateway,
+      gatewayPaymentId,
+    });
+    console.log('[email] confirmation sent to', patientEmail);
+  } catch (err) {
+    console.error('[email] sendPaymentConfirmation failed:', err);
+    return;
+  }
 
-  await supabaseAdmin.from('notification_log').upsert(
-    { appointment_id: appointmentId, type: 'confirmation' },
-    { onConflict: 'appointment_id,type' }
-  );
+  await supabaseAdmin
+    .from('notification_log')
+    .insert({ appointment_id: appointmentId, type: 'confirmation' });
 }

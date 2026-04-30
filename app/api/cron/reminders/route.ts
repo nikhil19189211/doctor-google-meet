@@ -1,182 +1,163 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { generateCode, storeCode } from '@/lib/consult-codes';
 import {
-  sendReminderNotification,
-  sendMeetingNotification,
-  AppointmentInfo,
-  MeetingInfo,
-} from '@/lib/notifications';
+  sendReminder24h,
+  sendReminderInPerson1h,
+} from '@/lib/email';
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_KEY!
 );
 
-// Vercel cron sends Authorization: Bearer <CRON_SECRET>
-function isAuthorized(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return true; // dev mode: open
-  const auth = req.headers.get('authorization');
-  return auth === `Bearer ${secret}`;
-}
+// Convert "YYYY-MM-DD" + "9:00 AM" in a given IANA timezone to a UTC Date.
+function appointmentToUTC(dateStr: string, timeStr: string, tz: string): Date {
+  const m = timeStr.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!m) return new Date(NaN);
 
-// Converts a local date-time string (no tz) into a UTC Date using the doctor's timezone.
-// DST-safe: uses Intl to compute the real offset at that instant.
-function parseInTz(localDt: string, tz: string): Date {
-  const naive = new Date(localDt + 'Z'); // treat as UTC to get a reference instant
+  let h = parseInt(m[1]);
+  const mins = parseInt(m[2]);
+  const isPM = m[3].toUpperCase() === 'PM';
+  if (isPM && h !== 12) h += 12;
+  if (!isPM && h === 12) h = 0;
+
+  const [y, mo, d] = dateStr.split('-').map(Number);
+
+  // Treat local clock time as UTC for a reference point
+  const t0 = Date.UTC(y, mo - 1, d, h, mins, 0);
+
+  // Find what clock time t0 (UTC) displays in the target timezone
   const fmt = new Intl.DateTimeFormat('en-US', {
     timeZone: tz,
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-    hour12: false,
+    year: 'numeric', month: 'numeric', day: 'numeric',
+    hour: 'numeric', minute: 'numeric', second: 'numeric',
+    hour12: false, hourCycle: 'h23',
   });
-  const p = fmt.formatToParts(naive);
-  const get = (type: string) => parseInt(p.find(pt => pt.type === type)?.value ?? '0');
-  const tzAsUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour') % 24, get('minute'), get('second'));
-  // offset = how far tz is ahead of UTC; subtract it to get real UTC for the local time
-  return new Date(naive.getTime() - (tzAsUtc - naive.getTime()));
+
+  const parts = Object.fromEntries(
+    fmt.formatToParts(new Date(t0))
+      .filter(p => p.type !== 'literal')
+      .map(p => [p.type, parseInt(p.value)])
+  );
+
+  // Normalize hour=24 (some implementations use 24 for midnight)
+  if (parts.hour === 24) parts.hour = 0;
+
+  const tzTime = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  const offsetMs = t0 - tzTime; // positive = timezone is behind UTC
+
+  return new Date(t0 + offsetMs);
 }
 
-function parseAppointmentDateTime(date: string, time: string): Date {
-  // date: "2026-04-21", time: "9:00 AM" or "2:30 PM"
-  // Uses DOCTOR_TIMEZONE so cron diff calculations are correct regardless of server timezone
-  const tz = process.env.DOCTOR_TIMEZONE || 'Asia/Kolkata';
-  const match = time.match(/(\d+):(\d+)\s*(AM|PM)/i);
-  if (!match) return parseInTz(`${date}T00:00`, tz);
-  let hours = parseInt(match[1]);
-  const minutes = parseInt(match[2]);
-  if (match[3].toUpperCase() === 'PM' && hours !== 12) hours += 12;
-  if (match[3].toUpperCase() === 'AM' && hours === 12) hours = 0;
-  const h = String(hours).padStart(2, '0');
-  const m = String(minutes).padStart(2, '0');
-  return parseInTz(`${date}T${h}:${m}`, tz);
-}
-
-async function getUserInfo(userId: string) {
-  const { data } = await supabaseAdmin.auth.admin.getUserById(userId);
-  if (!data?.user) return null;
-  const user = data.user;
-  return {
-    email: user.email!,
-    name: (user.user_metadata?.full_name as string) || user.email!.split('@')[0],
-    phone: user.user_metadata?.phone as string | undefined,
-  };
-}
-
-async function alreadyNotified(appointmentId: string, type: string): Promise<boolean> {
-  const { data } = await supabaseAdmin
-    .from('notification_log')
-    .select('id')
-    .eq('appointment_id', appointmentId)
-    .eq('type', type)
-    .maybeSingle();
-  return !!data;
-}
-
-async function markNotified(appointmentId: string, type: string) {
-  await supabaseAdmin
-    .from('notification_log')
-    .upsert({ appointment_id: appointmentId, type }, { onConflict: 'appointment_id,type' });
-}
-
-async function createVideoRoom(): Promise<{ code: string; url: string; roomName: string } | null> {
-  try {
-    const expiresAt = Math.floor(Date.now() / 1000) + 7200; // 2-hour room
-    const code = generateCode();
-    storeCode(code, expiresAt);
-
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-
-    await supabaseAdmin.from('doctor_meetings').insert({
-      room_name: code,
-      room_url: code,
-      code,
-      expires_at: new Date(expiresAt * 1000).toISOString(),
-      is_active: true,
-    });
-
-    return { code, url: `${appUrl}/consult`, roomName: code };
-  } catch {
-    return null;
-  }
-}
-
-export async function GET(req: NextRequest) {
-  if (!isAuthorized(req)) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+export async function GET(req: Request) {
+  // Verify cron secret when set (Vercel sends it as Bearer in Authorization header)
+  const secret = process.env.CRON_SECRET;
+  if (secret) {
+    const auth = req.headers.get('authorization');
+    if (auth !== `Bearer ${secret}`) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
   }
 
-  const now = new Date();
-  const doctorEmail = process.env.NEXT_PUBLIC_DOCTOR_EMAIL!;
+  const tz = process.env.DOCTOR_TIMEZONE ?? 'UTC';
+  const now = Date.now();
 
-  // Fetch all confirmed appointments that haven't been fully notified
+  // Fetch appointments that are paid and not cancelled.
+  // Look back 1 day so we don't miss appointments crossing midnight.
+  const lookbackDate = new Date(now - 26 * 60 * 60 * 1000)
+    .toISOString()
+    .split('T')[0];
+
   const { data: appointments, error } = await supabaseAdmin
     .from('appointments')
-    .select('id, date, time, type, mode, user_id, status')
-    .in('status', ['confirmed', 'pending']);
+    .select(`
+      id, user_id, date, time, type, mode, status,
+      payments!inner(status)
+    `)
+    .neq('status', 'cancelled')
+    .gte('date', lookbackDate)
+    .eq('payments.status', 'paid')
+    .order('date', { ascending: true });
 
-  if (error || !appointments) {
+  if (error) {
+    console.error('[cron] DB error:', error.message);
     return NextResponse.json({ error: 'DB error' }, { status: 500 });
   }
 
-  const results = { reminder_24h: 0, reminder_15m: 0, skipped: 0 };
+  const results = { checked: appointments?.length ?? 0, sent: 0, skipped: 0, errors: 0 };
 
-  for (const appt of appointments) {
-    const apptTime = parseAppointmentDateTime(appt.date, appt.time);
-    const diffMs = apptTime.getTime() - now.getTime();
-    const diffMin = diffMs / 60000;
+  for (const appt of (appointments ?? [])) {
+    const apptUTC = appointmentToUTC(appt.date, appt.time, tz);
+    if (isNaN(apptUTC.getTime())) continue;
 
-    // ── 24-hour reminder: fire when 23h ≤ diff < 25h ────────────────────────
-    if (diffMin >= 23 * 60 && diffMin < 25 * 60) {
-      if (await alreadyNotified(appt.id, 'reminder_24h')) { results.skipped++; continue; }
+    const diffMs = apptUTC.getTime() - now;
+    const diffMin = diffMs / 60_000;
+    const diffHours = diffMs / 3_600_000;
 
-      const user = await getUserInfo(appt.user_id);
-      if (!user) continue;
+    // Determine which notification window this appointment falls into
+    let notifType: 'reminder_24h' | 'reminder_1h' | null = null;
 
-      const info: AppointmentInfo = {
-        id: appt.id,
-        date: appt.date,
-        time: appt.time,
-        type: appt.type,
-        mode: appt.mode,
-        patientName: user.name,
-        patientEmail: user.email,
-      };
-
-      sendReminderNotification(info).catch(console.error);
-      await markNotified(appt.id, 'reminder_24h');
-      results.reminder_24h++;
+    if (diffHours >= 23 && diffHours <= 25) {
+      notifType = 'reminder_24h';
+    } else if (diffMin >= 50 && diffMin <= 70) {
+      notifType = 'reminder_1h';
     }
 
-    // ── 15-minute meeting notification: fire when 10 ≤ diff < 20 min ────────
-    else if (diffMin >= 10 && diffMin < 20) {
-      if (await alreadyNotified(appt.id, 'reminder_15m')) { results.skipped++; continue; }
+    if (!notifType) continue;
 
-      const user = await getUserInfo(appt.user_id);
-      if (!user) continue;
+    // Skip if already sent (notification_log has unique constraint on appointment_id + type)
+    const { data: alreadySent } = await supabaseAdmin
+      .from('notification_log')
+      .select('id')
+      .eq('appointment_id', appt.id)
+      .eq('type', notifType)
+      .maybeSingle();
 
-      const info: AppointmentInfo = {
-        id: appt.id,
-        date: appt.date,
-        time: appt.time,
-        type: appt.type,
-        mode: appt.mode,
-        patientName: user.name,
-        patientEmail: user.email,
-      };
+    if (alreadySent) {
+      results.skipped++;
+      continue;
+    }
 
-      let meeting: MeetingInfo | null = null;
-      if (appt.mode === 'Video') {
-        const room = await createVideoRoom();
-        if (room) meeting = { code: room.code, url: room.url };
+    // Fetch patient email + name from Supabase Auth
+    const { data: userData } = await supabaseAdmin.auth.admin.getUserById(appt.user_id);
+    if (!userData?.user?.email) {
+      results.errors++;
+      continue;
+    }
+
+    const user = userData.user;
+    const patientEmail = user.email!;
+    const patientName =
+      (user.user_metadata?.full_name as string | undefined) ??
+      patientEmail.split('@')[0];
+
+    const base = {
+      patientName,
+      patientEmail,
+      appointmentId: appt.id,
+      date: appt.date,
+      time: appt.time,
+      type: appt.type,
+      mode: appt.mode,
+    };
+
+    try {
+      if (notifType === 'reminder_24h') {
+        await sendReminder24h(base);
+      } else {
+        await sendReminderInPerson1h(base);
       }
 
-      sendMeetingNotification(info, meeting, doctorEmail).catch(console.error);
-      await markNotified(appt.id, 'reminder_15m');
-      results.reminder_15m++;
+      await supabaseAdmin
+        .from('notification_log')
+        .insert({ appointment_id: appt.id, type: notifType });
+
+      results.sent++;
+    } catch (err) {
+      console.error(`[cron] Failed ${notifType} for ${appt.id}:`, err);
+      results.errors++;
     }
   }
 
-  return NextResponse.json({ ok: true, ...results, checkedAt: now.toISOString() });
+  return NextResponse.json({ ok: true, ...results });
 }
