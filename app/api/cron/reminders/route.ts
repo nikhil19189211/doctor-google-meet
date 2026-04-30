@@ -3,7 +3,9 @@ import { createClient } from '@supabase/supabase-js';
 import {
   sendReminder24h,
   sendReminderInPerson1h,
+  sendVideoReminder15m,
 } from '@/lib/email';
+import { generateMeetLink } from '@/lib/google-meet';
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -71,7 +73,7 @@ export async function GET(req: Request) {
   const { data: appointments, error } = await supabaseAdmin
     .from('appointments')
     .select(`
-      id, user_id, date, time, type, mode, status,
+      id, user_id, date, time, type, mode, status, meet_link,
       payments!inner(status)
     `)
     .neq('status', 'cancelled')
@@ -95,12 +97,14 @@ export async function GET(req: Request) {
     const diffHours = diffMs / 3_600_000;
 
     // Determine which notification window this appointment falls into
-    let notifType: 'reminder_24h' | 'reminder_1h' | null = null;
+    let notifType: 'reminder_24h' | 'reminder_1h' | 'reminder_video_15m' | null = null;
 
     if (diffHours >= 23 && diffHours <= 25) {
       notifType = 'reminder_24h';
-    } else if (diffMin >= 50 && diffMin <= 70) {
+    } else if (diffMin >= 50 && diffMin <= 70 && appt.mode !== 'Video') {
       notifType = 'reminder_1h';
+    } else if (diffMin >= 10 && diffMin <= 20 && appt.mode === 'Video') {
+      notifType = 'reminder_video_15m';
     }
 
     if (!notifType) continue;
@@ -144,8 +148,21 @@ export async function GET(req: Request) {
     try {
       if (notifType === 'reminder_24h') {
         await sendReminder24h(base);
-      } else {
+      } else if (notifType === 'reminder_1h') {
         await sendReminderInPerson1h(base);
+      } else {
+        // reminder_video_15m — generate Meet link now (Calendar API is idempotent via appointmentId)
+        const meetLink = (appt.meet_link as string | null)
+          ?? (await generateMeetLink(appt.id, appt.date, appt.time, tz));
+
+        if (meetLink && !appt.meet_link) {
+          await supabaseAdmin
+            .from('appointments')
+            .update({ meet_link: meetLink })
+            .eq('id', appt.id);
+        }
+
+        await sendVideoReminder15m({ ...base, meetLink: meetLink ?? '' });
       }
 
       await supabaseAdmin

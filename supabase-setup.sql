@@ -20,7 +20,8 @@ CREATE TABLE appointments (
   date       TEXT        NOT NULL,   -- "YYYY-MM-DD"
   time       TEXT        NOT NULL,   -- "9:00 AM"
   type       TEXT        NOT NULL,
-  mode       TEXT        NOT NULL DEFAULT 'In-Person',  -- 'In-Person' | 'Video'
+  mode       TEXT        NOT NULL DEFAULT 'In-Person',
+  meet_link  TEXT,
   status     TEXT        NOT NULL DEFAULT 'pending',
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -97,7 +98,7 @@ CREATE POLICY "payments_select_own" ON payments
 CREATE POLICY "payments_service_all" ON payments FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 
--- ── 6. prescriptions ──────────────────────────────────────────
+-- ── 5. prescriptions ──────────────────────────────────────────
 CREATE TABLE prescriptions (
   id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   patient_id     UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -123,7 +124,7 @@ CREATE TABLE notification_log (
   id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   appointment_id UUID        NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
   type           TEXT        NOT NULL
-                             CHECK (type IN ('confirmation', 'reminder_24h', 'reminder_1h')),
+                             CHECK (type IN ('confirmation', 'reminder_24h', 'reminder_1h', 'reminder_video_15m')),
   sent_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (appointment_id, type)
 );

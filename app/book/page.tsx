@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
@@ -78,6 +78,13 @@ function IconPin() {
     </svg>
   );
 }
+function IconVideo() {
+  return (
+    <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.277A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z" />
+    </svg>
+  );
+}
 
 // ─── Slot pill ────────────────────────────────────────────────
 function SlotPill({
@@ -126,6 +133,7 @@ export default function BookPage() {
   const router = useRouter();
   const [user, setUser]               = useState<User | null>(null);
   const [appointmentType, setType]    = useState('');
+  const [mode, setMode]               = useState<'In-Person' | 'Video'>('In-Person');
   const [selectedDate, setDate]       = useState('');
   const [selectedTime, setTime]       = useState('');
   const [bookedSlots, setBookedSlots]   = useState<string[]>([]);
@@ -244,7 +252,7 @@ export default function BookPage() {
 
       const { data: appt, error: apptErr } = await supabase
         .from('appointments')
-        .insert({ user_id: user.id, date: selectedDate, time: selectedTime, type: appointmentType, mode: 'In-Person', status: 'pending' })
+        .insert({ user_id: user.id, date: selectedDate, time: selectedTime, type: appointmentType, mode, status: 'pending' })
         .select()
         .single();
       if (apptErr) throw apptErr;
@@ -354,10 +362,42 @@ export default function BookPage() {
               </div>
             </div>
 
-            {/* Step 2 — Date */}
+            {/* Step 2 — Consultation Mode */}
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
               <div className="flex items-center gap-3 mb-5">
                 <span className="w-7 h-7 rounded-full bg-teal-500 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">2</span>
+                <h2 className="text-base font-semibold text-gray-900">Consultation Mode</h2>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                {([
+                  { value: 'In-Person', icon: <IconPin />, title: 'In-Person Visit',       desc: 'Come to the clinic for your appointment'     },
+                  { value: 'Video',     icon: <IconVideo />, title: 'Video Consultation', desc: 'Attend your appointment from anywhere online' },
+                ] as { value: 'In-Person' | 'Video'; icon: React.ReactNode; title: string; desc: string }[]).map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setMode(opt.value)}
+                    className={`relative flex flex-col items-center text-center rounded-xl border-2 p-5 gap-3 transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-teal-400 focus:ring-offset-1
+                      ${mode === opt.value
+                        ? 'border-teal-500 bg-teal-50 shadow-sm'
+                        : 'border-gray-100 bg-gray-50/60 hover:border-teal-200 hover:bg-teal-50/50'
+                      }`}
+                  >
+                    {mode === opt.value && (
+                      <span className="absolute top-2 right-2 text-teal-500"><IconCheck /></span>
+                    )}
+                    <span className={mode === opt.value ? 'text-teal-600' : 'text-gray-400'}>{opt.icon}</span>
+                    <span className={`text-sm font-semibold ${mode === opt.value ? 'text-teal-700' : 'text-gray-700'}`}>{opt.title}</span>
+                    <span className="text-xs text-gray-400 leading-tight">{opt.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Step 3 — Date */}
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+              <div className="flex items-center gap-3 mb-5">
+                <span className="w-7 h-7 rounded-full bg-teal-500 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">3</span>
                 <h2 className="text-base font-semibold text-gray-900">Select Date</h2>
               </div>
               <div className="relative max-w-xs">
@@ -379,10 +419,10 @@ export default function BookPage() {
               )}
             </div>
 
-            {/* Step 3 — Time slot */}
+            {/* Step 4 — Time slot */}
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
               <div className="flex items-center gap-3 mb-5">
-                <span className="w-7 h-7 rounded-full bg-teal-500 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">3</span>
+                <span className="w-7 h-7 rounded-full bg-teal-500 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">4</span>
                 <h2 className="text-base font-semibold text-gray-900">Choose Time Slot</h2>
                 {selectedDate && !loadingSlots && (
                   <span className="ml-auto text-xs text-gray-400 bg-gray-50 border border-gray-100 rounded-full px-2.5 py-1">
@@ -526,6 +566,7 @@ export default function BookPage() {
               <ul className="space-y-3.5">
                 {[
                   { icon: <span className="text-base">📋</span>, label: 'Type',   val: appointmentType || '—' },
+                  { icon: mode === 'Video' ? <IconVideo /> : <IconPin />, label: 'Mode', val: mode },
                   { icon: <IconCal />,   label: 'Date',   val: fmtDate(selectedDate) },
                   { icon: <IconClock />, label: 'Time',   val: selectedTime || '—'   },
                 ].map(({ icon, label, val }) => (

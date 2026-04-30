@@ -16,6 +16,7 @@ export interface AppointmentEmailData {
   time: string;  // "9:00 AM"
   type: string;  // "General Consultation"
   mode: string;  // "In-Person" | "Video"
+  meetLink?: string;
 }
 
 export interface PaymentConfirmationData extends AppointmentEmailData {
@@ -317,6 +318,40 @@ ${ctaButton('View My Appointment', APP_URL + '/dashboard', '#DC2626')}
     data.patientEmail,
     `Starting Soon: In-Person Appointment at ${data.time}`,
     layout('#FEE2E2', '&#128205;', 'Your Appointment is in 1 Hour', `${fmtDate(data.date)} at ${data.time}`, body),
+  );
+}
+
+// ─── Email 4: 15-minute Video Reminder ───────────────────────────────────────
+export async function sendVideoReminder15m(data: AppointmentEmailData): Promise<void> {
+  const meetLink = data.meetLink ?? '';
+  const hasLink = meetLink.length > 0;
+
+  const body = `
+<p style="font-size:15px;color:#374151;margin:0 0 6px;">Hi <strong>${data.patientName}</strong>,</p>
+<p style="font-size:15px;color:#374151;margin:0;">Your video consultation begins in <strong>15 minutes</strong>. Click the button below to join.</p>
+
+${apptCard(data)}
+
+${hasLink ? `
+<!-- Join button -->
+<table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
+  <tr><td align="center">
+    <a href="${meetLink}" style="display:inline-block;background:#7C3AED;color:#FFFFFF;font-size:16px;font-weight:700;text-decoration:none;padding:16px 48px;border-radius:8px;letter-spacing:0.2px;">&#128247; Join Video Call</a>
+  </td></tr>
+</table>
+<p style="font-size:12px;color:#9CA3AF;text-align:center;margin:0 0 24px;">If the button doesn&rsquo;t work, copy this link:<br>
+  <span style="font-family:monospace;font-size:12px;color:#6B7280;word-break:break-all;">${meetLink}</span>
+</p>` : `
+<p style="font-size:14px;color:#9CA3AF;text-align:center;margin:0 0 24px;">Your meeting link will be available in your dashboard.</p>`}
+
+${ctaButton('View My Appointment', APP_URL + '/dashboard', '#7C3AED')}
+
+${CLINIC_PHONE ? `<p style="font-size:13px;color:#9CA3AF;text-align:center;margin:16px 0 0;">Questions? Call us at <strong>${CLINIC_PHONE}</strong>.</p>` : ''}`;
+
+  await send(
+    data.patientEmail,
+    `Starting in 15 min: Video Consultation at ${data.time}`,
+    layout('#EDE9FE', '&#127909;', 'Your Video Call Starts in 15 Minutes', `${fmtDate(data.date)} at ${data.time}`, body),
   );
 }
 
