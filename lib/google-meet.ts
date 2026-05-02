@@ -7,22 +7,16 @@ export async function generateMeetLink(
   _tz: string,
 ): Promise<string | null> {
   try {
-    const privateKey = process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?.replace(/\\n/g, '\n');
-    if (!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || !privateKey) {
-      console.warn('[meet] credentials not set — skipping');
+    const { GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_OAUTH_REFRESH_TOKEN } = process.env;
+    if (!GOOGLE_OAUTH_CLIENT_ID || !GOOGLE_OAUTH_CLIENT_SECRET || !GOOGLE_OAUTH_REFRESH_TOKEN) {
+      console.warn('[meet] OAuth credentials not set — skipping');
       return null;
     }
 
-    const auth = new google.auth.GoogleAuth({
-      credentials: {
-        client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        private_key: privateKey,
-      },
-      scopes: ['https://www.googleapis.com/auth/meetings.space.created'],
-    });
+    const oauth2Client = new google.auth.OAuth2(GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET);
+    oauth2Client.setCredentials({ refresh_token: GOOGLE_OAUTH_REFRESH_TOKEN });
 
-    const client = await auth.getClient();
-    const tokenRes = await client.getAccessToken();
+    const tokenRes = await oauth2Client.getAccessToken();
     if (!tokenRes.token) {
       console.error('[meet] Failed to obtain access token');
       return null;
